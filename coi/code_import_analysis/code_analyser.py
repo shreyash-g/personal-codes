@@ -29,6 +29,8 @@ class ImportInfo:
     full_path: str
     file_location: str
     type: str  # 'function', 'class', 'constant', or 'unknown'
+    is_used: bool = False  # Whether this import is actually used in the code
+    alias: Optional[str] = None  # The alias name if the import is aliased
 
 @dataclass
 class VariableInfo:
@@ -248,10 +250,14 @@ class CodeAnalyzer:
                             self.imports.append(ImportInfo(
                                 full_path=name.name,
                                 file_location=file_loc or "Could not resolve",
-                                type=obj_type or "unknown"
+                                type=obj_type or "unknown",
+                                is_used=False,
+                                alias=name.asname  # Store the alias if it exists
                             ))
                             if obj_type == 'class':
                                 self.type_map[name.name] = name.name
+                                if name.asname:  # Also map the alias to the same type
+                                    self.type_map[name.asname] = name.name
                 elif isinstance(node, ast.ImportFrom):
                     module = node.module or ''
                     for name in node.names:
@@ -261,12 +267,33 @@ class CodeAnalyzer:
                             self.imports.append(ImportInfo(
                                 full_path=full_path,
                                 file_location=file_loc or "Could not resolve",
-                                type=obj_type or "unknown"
+                                type=obj_type or "unknown",
+                                is_used=False,
+                                alias=name.asname  # Store the alias if it exists
                             ))
                             if obj_type == 'class':
                                 self.type_map[name.name] = full_path
+                                if name.asname:  # Also map the alias to the same type
+                                    self.type_map[name.asname] = full_path
 
-            # Second pass: track variable assignments
+            # Second pass: track import usage
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name):
+                    # Check if this name matches any of our imports or their aliases
+                    for imp in self.imports:
+                        if imp.full_path.split('.')[-1] == node.id or imp.alias == node.id:
+                            imp.is_used = True
+                elif isinstance(node, ast.Attribute):
+                    # Check for attribute access (e.g., module.function)
+                    if isinstance(node.value, ast.Name):
+                        for imp in self.imports:
+                            parts = imp.full_path.split('.')
+                            if len(parts) > 1:
+                                # Check both original name and alias
+                                if (parts[0] == node.value.id or imp.alias == node.value.id) and parts[-1] == node.attr:
+                                    imp.is_used = True
+
+            # Third pass: track variable assignments
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):
                     for target in node.targets:
@@ -301,7 +328,7 @@ class CodeAnalyzer:
                             if var_type:
                                 self.type_map[target.id] = var_type
 
-            # Third pass: collect function calls
+            # Fourth pass: collect function calls
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call):
                     if isinstance(node.func, ast.Name):
@@ -387,6 +414,9 @@ def analyze_script_file(file_path: str) -> None:
             print(f"  - {imp.full_path}")
             print(f"    Location: {imp.file_location}")
             print(f"    Type: {imp.type}")
+            print(f"    Used: {'Yes' if imp.is_used else 'No'}")
+            if imp.alias:
+                print(f"    Alias: {imp.alias}")
         
         print("\nVariables:")
         print("  Resolved:")
